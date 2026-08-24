@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Screen Share</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .container { width: 100%; max-width: 500px; padding: 40px; }
+    h1 { text-align: center; margin-bottom: 30px; color: #00d4ff; font-size: 24px; font-weight: 600; }
+    .section { background: #16213e; border-radius: 12px; padding: 30px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3); }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; margin-bottom: 8px; font-size: 14px; color: #a0a0a0; font-weight: 500; }
+    select, input[type="text"] {
+      width: 100%; padding: 12px 16px; background: #0f3460; border: 1px solid #1a4080;
+      border-radius: 8px; color: #e0e0e0; font-size: 14px; outline: none;
+    }
+    select:focus, input:focus { border-color: #00d4ff; }
+    .toggle-container { display: flex; align-items: center; gap: 12px; }
+    .toggle {
+      position: relative; width: 48px; height: 24px; background: #333;
+      border-radius: 12px; cursor: pointer; transition: background 0.3s;
+    }
+    .toggle.active { background: #00d4ff; }
+    .toggle::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 20px; height: 20px; background: white; border-radius: 50%; transition: transform 0.3s;
+    }
+    .toggle.active::after { transform: translateX(24px); }
+    .btn {
+      width: 100%; padding: 14px; border: none; border-radius: 8px;
+      font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 10px;
+    }
+    .btn-primary { background: #00d4ff; color: #1a1a2e; }
+    .btn-primary:hover { background: #00b8e6; transform: translateY(-1px); }
+    .btn-primary:disabled { background: #555; cursor: not-allowed; transform: none; }
+    .btn-danger { background: #e74c3c; color: white; }
+    .btn-danger:hover { background: #c0392b; }
+    .active-section { text-align: center; }
+    .room-code {
+      font-size: 36px; font-weight: 700; letter-spacing: 4px; color: #00d4ff;
+      margin: 20px 0; font-family: 'Courier New', monospace;
+    }
+    .room-code-label { font-size: 13px; color: #a0a0a0; margin-bottom: 8px; }
+    .qr-code { margin: 20px 0; }
+    .qr-code img { width: 180px; height: 180px; border-radius: 8px; background: white; padding: 8px; }
+    .stats { display: flex; justify-content: center; gap: 30px; margin: 20px 0; }
+    .stat { text-align: center; }
+    .stat-value { font-size: 20px; font-weight: 600; color: #00d4ff; }
+    .stat-label { font-size: 12px; color: #a0a0a0; margin-top: 4px; }
+    .status { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 500; }
+    .status-connected { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
+    .status-connecting { background: rgba(241, 196, 15, 0.2); color: #f1c40f; }
+    .status-disconnected { background: rgba(231, 76, 60, 0.2); color: #e74c3c; }
+    #active-section { display: none; }
+    #error-banner { display: none; background: #e74c3c; color: white; padding: 12px; border-radius: 8px; margin-bottom: 16px; text-align: center; }
+    .debug-log {
+      margin-top: 10px; padding: 8px; background: #0a0a1a; border-radius: 6px;
+      font-family: monospace; font-size: 11px; color: #666; max-height: 100px; overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>&#128250; COMPARTILHAR TELA</h1>
+
+    <div id="start-section" class="section">
+      <div id="error-banner"></div>
+
+      <div class="form-group">
+        <label>Qual tela deseja compartilhar?</label>
+        <select id="screen-select">
+          <option value="screen:0:0">Monitor Principal</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Qualidade</label>
+        <select id="quality-select">
+          <option value="economy">Economica (720p)</option>
+          <option value="standard" selected>Padrao (720p)</option>
+          <option value="high">Alta (1080p)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Audio do computador</label>
+        <div class="toggle-container">
+          <input type="checkbox" id="audio-toggle" checked style="display:none">
+          <div id="audio-toggle-btn" class="toggle active"></div>
+          <span id="audio-label">Ligado</span>
+        </div>
+      </div>
+
+      <button id="start-btn" class="btn btn-primary">INICIAR TRANSMISSAO</button>
+      <div id="debug-log" class="debug-log"></div>
+    </div>
+
+    <div id="active-section" class="section active-section">
+      <h2 style="margin-bottom: 15px; font-size: 18px; color: #2ecc71;">TRANSMISSAO ATIVA</h2>
+      <div class="room-code-label">Codigo da sala:</div>
+      <div id="room-code" class="room-code">----</div>
+      <div class="qr-code"><img id="qr-code" src="" alt="QR Code" /></div>
+      <div class="stats">
+        <div class="stat">
+          <div id="viewer-count" class="stat-value">0</div>
+          <div class="stat-label">Espectadores</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">720p</div>
+          <div class="stat-label">Qualidade</div>
+        </div>
+        <div class="stat">
+          <span id="status" class="status status-connected">Conectado</span>
+          <div class="stat-label">Status</div>
+        </div>
+      </div>
+      <button id="stop-btn" class="btn btn-danger">ENCERRAR TRANSMISSAO</button>
+    </div>
+  </div>
+
+  <script>
+    // ============================================
+    // SCREEN SHARE - RENDERER (NO BUNDLER)
+    // ============================================
+
+    // ICE servers - fetch from signaling server, fallback to STUN only
+    let ICE_SERVERS = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+    ];
+
+    const QUALITY_PRESETS = {
+      economy:  { maxBitrate: 1500000 },
+      standard: { maxBitrate: 2500000 },
+      high:     { maxBitrate: 5000000 },
+    };
+
+    // State
+    let socket = null;
+    let peerConnections = {};
+    let localStream = null;
+    let audioStream = null;
+    let currentRoomCode = '';
+    let currentQuality = 'standard';
+
+    // DOM
+    const screenSelect = document.getElementById('screen-select');
+    const qualitySelect = document.getElementById('quality-select');
+    const audioToggle = document.getElementById('audio-toggle');
+    const audioToggleBtn = document.getElementById('audio-toggle-btn');
+    const audioLabel = document.getElementById('audio-label');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const roomCodeDisplay = document.getElementById('room-code');
+    const viewerCountDisplay = document.getElementById('viewer-count');
+    const statusDisplay = document.getElementById('status');
+    const startSection = document.getElementById('start-section');
+    const activeSection = document.getElementById('active-section');
+    const qrCodeImg = document.getElementById('qr-code');
+    const debugLog = document.getElementById('debug-log');
+
+    function log(msg, color) {
+      console.log('[Renderer]', msg);
+      if (debugLog) {
+        var div = document.createElement('div');
+        div.style.color = color || '#666';
+        div.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+        debugLog.appendChild(div);
+        debugLog.scrollTop = debugLog.scrollHeight;
+      }
+    }
+
+    function showError(msg) {
+      log('ERROR: ' + msg, '#e74c3c');
+      var banner = document.getElementById('error-banner');
+      if (banner) { banner.textContent = msg; banner.style.display = 'block'; }
+    }
+
+    // Audio toggle
+    audioToggleBtn.addEventListener('click', function() {
+      this.classList.toggle('active');
+      audioToggle.checked = this.classList.contains('active');
+      audioLabel.textContent = this.classList.contains('active') ? 'Ligado' : 'Desligado';
+    });
+
+    // Init
+    async function init() {
+      log('Initializing...');
+      await loadScreens();
+      startBtn.addEventListener('click', startTransmission);
+      stopBtn.addEventListener('click', stopTransmission);
+      qualitySelect.addEventListener('change', function() { currentQuality = this.value; });
+      log('Ready!', '#2ecc71');
+    }
+
+    async function loadScreens() {
+      try {
+        var api = window.electronAPI;
+        if (!api) { log('No electronAPI', '#e74c3c'); return; }
+        var sources = await api.getSources();
+        screenSelect.innerHTML = '';
+        if (sources && sources.length > 0) {
+          sources.forEach(function(s) {
+            var opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = s.name;
+            screenSelect.appendChild(opt);
+          });
+          log('Screens: ' + sources.map(function(s) { return s.name; }).join(', '), '#2ecc71');
+        }
+      } catch (e) {
+        log('Load screens error: ' + e.message, '#e74c3c');
+      }
+    }
+
+    async function startTransmission() {
+      updateStatus('connecting');
+      startBtn.disabled = true;
+      startBtn.textContent = 'Capturando tela...';
+
+      try {
+        log('Starting screen capture...');
+
+        // Verify electronAPI is available
+        if (!window.electronAPI) {
+          throw new Error('electronAPI not available - preload may have failed');
+        }
+
+        // Tell main process which screen was selected (so setDisplayMediaRequestHandler uses it)
+        var selectedId = screenSelect.value || '';
+        if (selectedId && window.electronAPI.setSelectedScreen) {
+          await window.electronAPI.setSelectedScreen(selectedId);
+        }
+
+        // Use getDisplayMedia (the modern Electron approach).
+        // The main process has setDisplayMediaRequestHandler which auto-grants
+        // the screen capture via desktopCapturer.
+        // NOTE: getUserMedia + chromeMediaSource: 'desktop' is broken in Electron 28+
+        try {
+          localStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 },
+            },
+            audio: audioToggle.checked ? 'loopback' : false,
+          });
+          log('Screen captured!', '#2ecc71');
+        } catch (e1) {
+          // Fallback: try without specific constraints
+          log('First attempt failed: ' + e1.message + ', trying simpler constraints...');
+          try {
+            localStream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: audioToggle.checked ? 'loopback' : false,
+            });
+            log('Screen captured (fallback)!', '#2ecc71');
+          } catch (e2) {
+            throw new Error('Screen capture failed: ' + e2.message + '. Make sure screen sharing is allowed.');
+          }
+        }
+
+        if (!localStream || localStream.getVideoTracks().length === 0) {
+          throw new Error('No video track');
+        }
+
+        log('Video track: ' + localStream.getVideoTracks()[0].label, '#2ecc71');
+
+        // Audio is already captured via getDisplayMedia if audio was enabled.
+        // If loopback audio wasn't captured, try to get desktop audio separately.
+        if (audioToggle.checked && localStream.getAudioTracks().length === 0) {
+          try {
+            audioStream = await navigator.mediaDevices.getDisplayMedia({
+              video: false,
+              audio: 'loopback',
+            });
+            log('Desktop audio captured separately', '#2ecc71');
+          } catch (e) {
+            log('Desktop audio failed (continuing without audio)', '#f1c40f');
+          }
+        }
+
+        startBtn.textContent = 'Conectando...';
+
+        // Connect to server
+        var serverUrl = await window.electronAPI.getServerUrl();
+        log('Connecting to ' + serverUrl + '...');
+
+        socket = io(serverUrl, {
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+          reconnectionAttempts: 10,
+          reconnectionDelay: 1000,
+        });
+
+        await new Promise(function(resolve, reject) {
+          var timeout = setTimeout(function() { reject(new Error('Timeout')); }, 15000);
+          socket.on('connect', function() { clearTimeout(timeout); resolve(); });
+          socket.on('connect_error', function(err) { clearTimeout(timeout); reject(err); });
+        });
+
+        log('Connected to server!', '#2ecc71');
+        startBtn.textContent = 'Criando sala...';
+
+        // Fetch ICE servers from signaling server (includes TURN config)
+        try {
+          var iceResp = await fetch(serverUrl.replace(/\/socket\.io.*$/, '') + '/ice-servers');
+          if (iceResp.ok) {
+            var iceData = await iceResp.json();
+            if (iceData.iceServers && iceData.iceServers.length > 0) {
+              ICE_SERVERS = iceData.iceServers;
+              log('Loaded ' + ICE_SERVERS.length + ' ICE servers from server');
+            }
+          }
+        } catch (e) {
+          log('Could not fetch ICE servers, using defaults: ' + e.message);
+        }
+
+        socket.emit('create_room', { quality: currentQuality, audioEnabled: audioToggle.checked });
+
+        socket.once('room_created', function(data) {
+          currentRoomCode = data.roomCode;
+          roomCodeDisplay.textContent = currentRoomCode;
+          log('Room created: ' + currentRoomCode, '#2ecc71');
+          qrCodeImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=screen-share:' + data.roomCode;
+
+          startSection.style.display = 'none';
+          activeSection.style.display = 'block';
+          updateStatus('connected');
+
+          socket.on('viewer_joined', function(data) {
+            log('Viewer joined: ' + data.viewerSocketId, '#2ecc71');
+            handleNewViewer(data.viewerSocketId);
+            viewerCountDisplay.textContent = data.viewerCount;
+          });
+
+          socket.on('viewer_left', function(data) {
+            log('Viewer left: ' + data.viewerSocketId);
+            viewerCountDisplay.textContent = data.viewerCount;
+            closePeer(data.viewerSocketId);
+          });
+
+          socket.on('viewer_count', function(data) {
+            viewerCountDisplay.textContent = data.count;
+          });
+
+          socket.on('host_disconnected', function() { stopTransmission(); });
+
+          socket.on('webrtc_answer', async function(data) {
+            log('Answer from ' + data.senderSocketId);
+            var pc = peerConnections[data.senderSocketId];
+            if (pc) {
+              try {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                log('Remote desc set OK');
+              } catch (e) { log('Remote desc error: ' + e, '#e74c3c'); }
+            }
+          });
+
+          socket.on('ice_candidate', async function(data) {
+            var pc = peerConnections[data.senderSocketId];
+            if (pc && data.candidate) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              } catch (e) { log('ICE error: ' + e, '#e74c3c'); }
+            }
+          });
+
+          socket.on('quality_changed', function(data) {
+            currentQuality = data.quality;
+            adaptQuality();
+          });
+        });
+
+        socket.on('room_error', function(data) {
+          showError(data.error);
+          updateStatus('disconnected');
+          startBtn.disabled = false;
+          startBtn.textContent = 'INICIAR TRANSMISSAO';
+        });
+
+      } catch (error) {
+        log('FATAL: ' + error.message, '#e74c3c');
+        showError(error.message);
+        updateStatus('disconnected');
+        startBtn.disabled = false;
+        startBtn.textContent = 'INICIAR TRANSMISSAO';
+        if (localStream) { localStream.getTracks().forEach(function(t) { t.stop(); }); localStream = null; }
+      }
+    }
+
+    async function handleNewViewer(viewerSocketId) {
+      if (!localStream) return;
+
+      log('Creating peer for ' + viewerSocketId);
+      var pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      peerConnections[viewerSocketId] = pc;
+
+      pc.onicecandidate = function(event) {
+        if (event.candidate && socket) {
+          socket.emit('ice_candidate', { targetSocketId: viewerSocketId, candidate: event.candidate });
+        }
+      };
+
+      pc.onconnectionstatechange = function() {
+        log('Connection [' + viewerSocketId + ']: ' + pc.connectionState,
+          pc.connectionState === 'connected' ? '#2ecc71' : '#f1c40f');
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          closePeer(viewerSocketId);
+        }
+      };
+
+      pc.oniceconnectionstatechange = function() {
+        log('ICE [' + viewerSocketId + ']: ' + pc.iceConnectionState);
+      };
+
+      localStream.getTracks().forEach(function(track) {
+        pc.addTrack(track, localStream);
+      });
+
+      if (audioStream) {
+        audioStream.getTracks().forEach(function(track) {
+          pc.addTrack(track, audioStream);
+        });
+      }
+
+      try {
+        var offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_offer', { targetSocketId: viewerSocketId, offer: pc.localDescription });
+        log('Offer sent to ' + viewerSocketId);
+      } catch (e) {
+        log('Offer error: ' + e, '#e74c3c');
+      }
+    }
+
+    function closePeer(id) {
+      if (peerConnections[id]) {
+        peerConnections[id].close();
+        delete peerConnections[id];
+      }
+    }
+
+    function adaptQuality() {
+      var settings = QUALITY_PRESETS[currentQuality];
+      if (!settings || !localStream) return;
+      var track = localStream.getVideoTracks()[0];
+      if (!track) return;
+      Object.keys(peerConnections).forEach(function(id) {
+        var pc = peerConnections[id];
+        pc.getSenders().forEach(function(sender) {
+          if (sender.track === track) {
+            var params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+            params.encodings[0].maxBitrate = settings.maxBitrate;
+            sender.setParameters(params);
+          }
+        });
+      });
+    }
+
+    function stopTransmission() {
+      Object.keys(peerConnections).forEach(function(id) { peerConnections[id].close(); });
+      peerConnections = {};
+      if (localStream) { localStream.getTracks().forEach(function(t) { t.stop(); }); localStream = null; }
+      if (audioStream) { audioStream.getTracks().forEach(function(t) { t.stop(); }); audioStream = null; }
+      if (socket) { socket.emit('leave_room'); socket.disconnect(); socket = null; }
+      currentRoomCode = '';
+      roomCodeDisplay.textContent = '----';
+      viewerCountDisplay.textContent = '0';
+      startSection.style.display = 'block';
+      activeSection.style.display = 'none';
+      startBtn.disabled = false;
+      startBtn.textContent = 'INICIAR TRANSMISSAO';
+      updateStatus('disconnected');
+    }
+
+    function updateStatus(status) {
+      statusDisplay.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+      statusDisplay.className = 'status status-' + status;
+    }
+
+    // GO!
+    init();
+  </script>
+</body>
+</html>

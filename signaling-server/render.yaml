@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: screen-share-signaling
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: PUBLIC_IP
+        sync: false  # Set this to your Render service IP after deployment
+      - key: TURN_SECRET
+        generateValue: true
+      - key: TURN_USERNAME
+        value: screenshare
+      - key: TURN_CREDENTIAL
+        generateValue: true
+    healthCheckPath: /health
+    autoDeploy: true
+    plan: free
