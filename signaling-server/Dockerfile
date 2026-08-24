@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy package files
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci
 
 # Copy source
 COPY tsconfig.json ./
@@ -31,10 +31,12 @@ RUN apt-get update && apt-get install -y \
     coturn \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy package files for production install
+COPY package*.json ./
+RUN npm ci --omit=dev
+
 # Copy built files
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
 COPY coturn.conf ./
 
 # Copy start script
