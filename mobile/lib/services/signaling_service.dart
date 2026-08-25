@@ -31,6 +31,8 @@ class SignalingService {
 
   // Buffered offer (received before peer connection is ready)
   dynamic _pendingOffer;
+  // Buffered ICE candidates (received before peer connection is ready)
+  List<dynamic> _pendingIceCandidates = [];
 
   Future<bool> connect(String roomCode, {String serverUrl = 'http://localhost:3001'}) async {
     _roomCode = roomCode;
@@ -40,7 +42,7 @@ class SignalingService {
     try {
       debugPrint('[Signaling] Connecting to $serverUrl');
       _socket = IO.io(serverUrl, IO.OptionBuilder()
-          .setTransports(['websocket'])
+          .setTransports(['websocket', 'polling'])
           .enableAutoConnect()
           .enableReconnection()
           .setReconnectionAttempts(10)
@@ -102,7 +104,12 @@ class SignalingService {
       });
 
       _socket!.on('ice_candidate', (data) async {
-        if (data['candidate'] != null && _peerConnection != null) {
+        if (data['candidate'] != null) {
+          if (_peerConnection == null) {
+            debugPrint('[Signaling] Buffering ICE candidate (peer not ready)');
+            _pendingIceCandidates.add(data);
+            return;
+          }
           debugPrint('[Signaling] Received ICE candidate');
           final candidate = RTCIceCandidate(
             data['candidate']['candidate'],
@@ -237,6 +244,26 @@ class SignalingService {
     _peerConnection!.onSignalingState = (state) {
       debugPrint('[WebRTC] Signaling state: $state');
     };
+
+    // Process buffered ICE candidates
+    if (_pendingIceCandidates.isNotEmpty) {
+      debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} buffered ICE candidates');
+      for (final data in _pendingIceCandidates) {
+        if (data['candidate'] != null) {
+          final candidate = RTCIceCandidate(
+            data['candidate']['candidate'],
+            data['candidate']['sdpMid'],
+            data['candidate']['sdpMLineIndex'],
+          );
+          try {
+            await _peerConnection!.addCandidate(candidate);
+          } catch (e) {
+            debugPrint('[WebRTC] Error adding buffered ICE candidate: $e');
+          }
+        }
+      }
+      _pendingIceCandidates.clear();
+    }
 
     // Process buffered offer if one arrived while peer connection was being set up
     if (_pendingOffer != null) {
@@ -396,6 +423,8 @@ class SignalingService {
 
     _peerConnection?.close();
     _peerConnection = null;
+    _pendingOffer = null;
+    _pendingIceCandidates.clear();
 
     _socket?.emit('leave_room');
     _socket?.disconnect();
