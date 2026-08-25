@@ -33,11 +33,18 @@ class SignalingService {
   dynamic _pendingOffer;
   // Buffered ICE candidates (received before peer connection is ready)
   List<dynamic> _pendingIceCandidates = [];
+  // Cached ICE servers (fetched before socket connects)
+  List<Map<String, dynamic>>? _cachedIceServers;
 
   Future<bool> connect(String roomCode, {String serverUrl = 'http://localhost:3001'}) async {
     _roomCode = roomCode;
     _serverUrl = serverUrl;
     _hasJoinedRoom = false;
+
+    // Pre-fetch ICE servers BEFORE connecting socket
+    debugPrint('[Signaling] Pre-fetching ICE servers...');
+    _cachedIceServers = await _fetchIceServers();
+    debugPrint('[Signaling] ICE servers ready (${_cachedIceServers!.length} servers)');
 
     try {
       debugPrint('[Signaling] Connecting to $serverUrl');
@@ -197,7 +204,7 @@ class SignalingService {
   }
 
   Future<void> _setupPeerConnection() async {
-    final iceServers = await _fetchIceServers();
+    final iceServers = _cachedIceServers ?? await _fetchIceServers();
     _peerConnection = await createPeerConnection({
       'iceServers': iceServers,
       'sdpSemantics': 'unified-plan',
