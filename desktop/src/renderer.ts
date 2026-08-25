@@ -1,9 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { SOCKET_EVENTS, QualityPreset } from './shared/types';
-import { ICE_SERVERS, QUALITY_PRESETS } from './shared/constants';
-
-// Fetched ICE servers from server (includes TURN)
-let fetchedIceServers: RTCIceServer[] | null = null;
+import { QUALITY_PRESETS } from './shared/constants';
 
 // DOM Elements
 const screenSelect = document.getElementById('screen-select') as HTMLSelectElement;
@@ -32,11 +29,13 @@ function log(msg: string, color?: string): void {
 
 // State
 let socket: Socket | null = null;
-let peerConnections: Map<string, RTCPeerConnection> = new Map();
 let localStream: MediaStream | null = null;
 let audioStream: MediaStream | null = null;
 let currentRoomCode: string = '';
 let currentQuality: QualityPreset = 'standard';
+let frameInterval: ReturnType<typeof setInterval> | null = null;
+let captureCanvas: HTMLCanvasElement | null = null;
+let captureCtx: CanvasRenderingContext2D | null = null;
 
 async function init(): Promise<void> {
   log('Initializing...');
@@ -85,6 +84,83 @@ function showError(msg: string): void {
   }
 }
 
+function getFrameInterval(): number {
+  switch (currentQuality) {
+    case 'economy': return 150;  // ~7 fps
+    case 'standard': return 100; // ~10 fps
+    case 'high': return 66;      // ~15 fps
+    default: return 100;
+  }
+}
+
+function getJpegQuality(): number {
+  switch (currentQuality) {
+    case 'economy': return 0.5;
+    case 'standard': return 0.65;
+    case 'high': return 0.8;
+    default: return 0.65;
+  }
+}
+
+function getTargetWidth(): number {
+  switch (currentQuality) {
+    case 'economy': return 960;
+    case 'standard': return 1280;
+    case 'high': return 1920;
+    default: return 1280;
+  }
+}
+
+function startFrameCapture(): void {
+  if (!localStream) return;
+
+  const videoTrack = localStream.getVideoTracks()[0];
+  // @ts-ignore - getSettings exists on MediaStreamTrack
+  const settings = videoTrack.getSettings();
+  const srcWidth = settings.width || 1280;
+  const srcHeight = settings.height || 720;
+
+  const targetWidth = getTargetWidth();
+  const targetHeight = Math.round((srcHeight / srcWidth) * targetWidth);
+
+  captureCanvas = document.createElement('canvas');
+  captureCanvas.width = targetWidth;
+  captureCanvas.height = targetHeight;
+  captureCtx = captureCanvas.getContext('2d');
+
+  const video = document.createElement('video');
+  video.srcObject = localStream;
+  video.play();
+
+  let sending = false;
+
+  frameInterval = setInterval(() => {
+    if (sending || !captureCtx || !captureCanvas || !socket) return;
+    sending = true;
+
+    captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+    const dataUrl = captureCanvas.toDataURL('image/jpeg', getJpegQuality());
+
+    socket.emit('screen_frame', { frame: dataUrl }, () => {
+      sending = false;
+    });
+
+    // Fallback: if callback never fires, reset after 500ms
+    setTimeout(() => { sending = false; }, 500);
+  }, getFrameInterval());
+
+  log(`Frame capture started (${targetWidth}x${targetHeight} @ ~${Math.round(1000 / getFrameInterval())}fps)`, '#2ecc71');
+}
+
+function stopFrameCapture(): void {
+  if (frameInterval) {
+    clearInterval(frameInterval);
+    frameInterval = null;
+  }
+  captureCanvas = null;
+  captureCtx = null;
+}
+
 async function startTransmission(): Promise<void> {
   updateStatus('connecting');
   startBtn.disabled = true;
@@ -93,10 +169,6 @@ async function startTransmission(): Promise<void> {
   try {
     log('Starting screen capture...');
 
-    // Use getDisplayMedia (the modern Electron approach).
-    // The main process has setDisplayMediaRequestHandler which auto-grants
-    // the screen capture via desktopCapturer.
-    // NOTE: getUserMedia + chromeMediaSource: 'desktop' is broken in Electron 28+
     try {
       localStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -108,7 +180,7 @@ async function startTransmission(): Promise<void> {
       });
       log('✅ Screen captured!', '#2ecc71');
     } catch (err1: any) {
-      log('First attempt failed: ' + err1.message + ', trying simpler constraints...');
+      log('First attempt failed: ' + err1.message + ', trying simpler...');
       try {
         localStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
@@ -128,8 +200,6 @@ async function startTransmission(): Promise<void> {
     log(`Video: ${track.label}`, '#2ecc71');
     startBtn.textContent = '⏳ Conectando...';
 
-    // Audio is already captured via getDisplayMedia if enabled.
-    // If loopback audio wasn't captured, try separately.
     if (audioToggle.checked && localStream.getAudioTracks().length === 0) {
       try {
         audioStream = await navigator.mediaDevices.getDisplayMedia({
@@ -146,7 +216,7 @@ async function startTransmission(): Promise<void> {
     const serverUrl = await (window as any).electronAPI.getServerUrl();
     log(`Connecting to ${serverUrl}...`);
 
-    // Pre-warm: wake up Render free tier before connecting
+    // Pre-warm: wake up Render free tier
     log('Warming up server...');
     for (let i = 0; i < 3; i++) {
       try {
@@ -167,25 +237,13 @@ async function startTransmission(): Promise<void> {
     });
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timeout - server may be starting up. Try again in 30 seconds.')), 45000);
+      const timeout = setTimeout(() => reject(new Error('Timeout - try again in 30s')), 45000);
       socket!.on('connect', () => { clearTimeout(timeout); resolve(); });
       socket!.on('connect_error', (err) => { clearTimeout(timeout); reject(err); });
     });
 
     log('✅ Connected to server', '#2ecc71');
     startBtn.textContent = '⏳ Criando sala...';
-
-    // Fetch ICE servers from server (includes TURN for cross-network)
-    try {
-      const iceRes = await fetch(serverUrl + '/ice-servers');
-      const iceData = await iceRes.json();
-      if (iceData.iceServers && iceData.iceServers.length > 0) {
-        fetchedIceServers = iceData.iceServers.map((s: any) => ({ urls: s.urls, username: s.username, credential: s.credential }));
-        log(`Loaded ${fetchedIceServers!.length} ICE servers from server`, '#2ecc71');
-      }
-    } catch (e) {
-      log('Using default STUN servers', '#f1c40f');
-    }
 
     socket.emit(SOCKET_EVENTS.CREATE_ROOM, {
       quality: currentQuality,
@@ -202,16 +260,17 @@ async function startTransmission(): Promise<void> {
       activeSection.style.display = 'block';
       updateStatus('connected');
 
-      socket!.on(SOCKET_EVENTS.VIEWER_JOINED, async (data: any) => {
+      // Start sending frames
+      startFrameCapture();
+
+      socket!.on(SOCKET_EVENTS.VIEWER_JOINED, (data: any) => {
         log(`★ Viewer joined: ${data.viewerSocketId}`, '#2ecc71');
-        await handleNewViewer(data.viewerSocketId);
         viewerCountDisplay.textContent = data.viewerCount.toString();
       });
 
       socket!.on(SOCKET_EVENTS.VIEWER_LEFT, (data: any) => {
-        log(`Viewer left: ${data.viewerSocketId}`, '#f39c12');
+        log(`Viewer left: ${data.viewerSocketId}`);
         viewerCountDisplay.textContent = data.viewerCount.toString();
-        closePeerConnection(data.viewerSocketId);
       });
 
       socket!.on(SOCKET_EVENTS.VIEWER_COUNT, (data: any) => {
@@ -220,33 +279,11 @@ async function startTransmission(): Promise<void> {
 
       socket!.on(SOCKET_EVENTS.HOST_DISCONNECTED, () => stopTransmission());
 
-      socket!.on(SOCKET_EVENTS.WEBRTC_ANSWER, async (data: any) => {
-        log(`★ Answer from ${data.senderSocketId}`);
-        const pc = peerConnections.get(data.senderSocketId);
-        if (pc) {
-          try {
-            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-            log('Remote description set OK');
-          } catch (err) {
-            log('Remote desc error: ' + err, '#e74c3c');
-          }
-        }
-      });
-
-      socket!.on(SOCKET_EVENTS.ICE_CANDIDATE, async (data: any) => {
-        const pc = peerConnections.get(data.senderSocketId);
-        if (pc && data.candidate) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-          } catch (err) {
-            log('ICE error: ' + err, '#e74c3c');
-          }
-        }
-      });
-
       socket!.on(SOCKET_EVENTS.QUALITY_CHANGED, (data: any) => {
         currentQuality = data.quality;
-        adaptQuality();
+        // Restart frame capture with new quality settings
+        stopFrameCapture();
+        startFrameCapture();
       });
     });
 
@@ -269,88 +306,8 @@ async function startTransmission(): Promise<void> {
   }
 }
 
-async function handleNewViewer(viewerSocketId: string): Promise<void> {
-  if (!localStream) return;
-
-  log(`Creating peer connection for ${viewerSocketId}`);
-  const pc = createPeerConnection(viewerSocketId);
-  peerConnections.set(viewerSocketId, pc);
-
-  localStream.getTracks().forEach((track) => {
-    pc.addTrack(track, localStream!);
-  });
-
-  if (audioStream) {
-    audioStream.getTracks().forEach((track) => pc.addTrack(track, audioStream!));
-  }
-
-  try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket!.emit(SOCKET_EVENTS.WEBRTC_OFFER, {
-      targetSocketId: viewerSocketId,
-      offer: pc.localDescription,
-    });
-    log(`★ Offer sent to ${viewerSocketId}`);
-  } catch (err) {
-    log('Offer error: ' + err, '#e74c3c');
-  }
-}
-
-function createPeerConnection(targetSocketId: string): RTCPeerConnection {
-  const iceServers = fetchedIceServers || ICE_SERVERS;
-  log(`Using ${iceServers.length} ICE servers for peer connection`);
-  const pc = new RTCPeerConnection({ iceServers });
-
-  pc.onicecandidate = (event) => {
-    if (event.candidate && socket) {
-      socket.emit(SOCKET_EVENTS.ICE_CANDIDATE, {
-        targetSocketId,
-        candidate: event.candidate,
-      });
-    }
-  };
-
-  pc.onconnectionstatechange = () => {
-    log(`Connection [${targetSocketId}]: ${pc.connectionState}`,
-      pc.connectionState === 'connected' ? '#2ecc71' : '#f1c40f');
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      closePeerConnection(targetSocketId);
-    }
-  };
-
-  pc.oniceconnectionstatechange = () => {
-    log(`ICE [${targetSocketId}]: ${pc.iceConnectionState}`);
-  };
-
-  return pc;
-}
-
-function closePeerConnection(targetSocketId: string): void {
-  const pc = peerConnections.get(targetSocketId);
-  if (pc) { pc.close(); peerConnections.delete(targetSocketId); }
-}
-
-function adaptQuality(): void {
-  const settings = QUALITY_PRESETS[currentQuality];
-  if (!localStream) return;
-  const videoTrack = localStream.getVideoTracks()[0];
-  if (!videoTrack) return;
-  for (const [, pc] of peerConnections) {
-    const sender = pc.getSenders().find((s) => s.track === videoTrack);
-    if (sender) {
-      const params = sender.getParameters();
-      if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-      params.encodings[0].maxBitrate = settings.maxBitrate;
-      sender.setParameters(params);
-      break;
-    }
-  }
-}
-
 async function stopTransmission(): Promise<void> {
-  for (const [, pc] of peerConnections) pc.close();
-  peerConnections.clear();
+  stopFrameCapture();
   if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
   if (audioStream) { audioStream.getTracks().forEach((t) => t.stop()); audioStream = null; }
   if (socket) { socket.emit(SOCKET_EVENTS.LEAVE_ROOM); socket.disconnect(); socket = null; }

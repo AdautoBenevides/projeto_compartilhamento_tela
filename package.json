@@ -1,0 +1,14 @@
+{
+  "name": "screen-share",
+  "version": "1.0.0",
+  "description": "Lightweight PC-to-mobile screen sharing application",
+  "private": true,
+  "scripts": {
+    "dev:server": "cd signaling-server && npm run dev",
+    "build:server": "cd signaling-server && npm run build",
+    "dev:desktop": "cd desktop && npm run dev",
+    "build:desktop": "cd desktop && npm run build",
+    "setup": "cd signaling-server && npm install && cd ../desktop && npm install",
+    "start:server": "cd signaling-server && npm start"
+  }
+}

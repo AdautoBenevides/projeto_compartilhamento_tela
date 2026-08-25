@@ -51,6 +51,11 @@ export class SocketHandler {
       this.handleICECandidate(socket, payload)
     );
 
+    // Screen frame relay (JPEG over WebSocket)
+    socket.on('screen_frame', (payload: { frame: string }) =>
+      this.handleScreenFrame(socket, payload)
+    );
+
     // Stream control
     socket.on(SOCKET_EVENTS.QUALITY_CHANGED, (payload: { quality: typeof DEFAULT_QUALITY }) =>
       this.handleQualityChanged(socket, payload)
@@ -154,6 +159,16 @@ export class SocketHandler {
           quality: payload.quality,
         });
       }
+    }
+  }
+
+  private handleScreenFrame(socket: Socket, payload: { frame: string }): void {
+    const room = this.roomManager.getRoomBySocket(socket.id);
+    if (!room || room.hostId !== socket.id) return;
+
+    // Relay frame to all viewers in the room
+    for (const [viewerId] of room.viewers) {
+      this.io.to(viewerId).emit('screen_frame', { frame: payload.frame });
     }
   }
 

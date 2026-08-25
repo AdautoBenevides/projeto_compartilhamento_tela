@@ -1,10 +1,9 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/signaling_service.dart';
-import '../models/connection_stats.dart';
 
 class PlayerScreen extends StatefulWidget {
   final SignalingService signaling;
@@ -21,41 +20,39 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   bool _isConnected = false;
   bool _isReconnecting = false;
   bool _showControls = true;
   bool _isFullscreen = true;
   Timer? _hideControlsTimer;
 
-  // Stats
-  bool _showStats = false;
-  ConnectionStats _stats = ConnectionStats.empty();
-  Timer? _statsTimer;
+  // Frame display
+  Uint8List? _currentFrame;
+  int _fps = 0;
+  int _frameCount = 0;
+  Timer? _fpsTimer;
 
   @override
   void initState() {
     super.initState();
-    _initRenderer();
     _listenToStream();
     WakelockPlus.enable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _startHideControlsTimer();
-    _startStatsTimer();
-  }
-
-  Future<void> _initRenderer() async {
-    await _remoteRenderer.initialize();
-    setState(() {});
+    _startFpsCounter();
   }
 
   void _listenToStream() {
-    // Listen for remote stream
-    widget.signaling.onRemoteStream = (stream) {
-      _remoteRenderer.srcObject = stream;
+    // Listen for JPEG frames
+    widget.signaling.onFrame = (Uint8List frameBytes) {
+      if (!mounted) return;
       setState(() {
-        _isConnected = true;
-        _isReconnecting = false;
+        _currentFrame = frameBytes;
+        _frameCount++;
+        if (!_isConnected) {
+          _isConnected = true;
+          _isReconnecting = false;
+        }
       });
     };
 
@@ -81,8 +78,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
     };
   }
 
+  void _startFpsCounter() {
+    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {
+          _fps = _frameCount;
+          _frameCount = 0;
+        });
+      }
+    });
+  }
+
   Future<void> _attemptReconnect() async {
-    // Auto-reconnect logic handled by signaling service
     int attempts = 0;
     const maxAttempts = 10;
 
@@ -193,27 +200,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hideControlsTimer?.cancel();
-    _statsTimer?.cancel();
-    _remoteRenderer.dispose();
+    _fpsTimer?.cancel();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
-  }
-
-  void _startStatsTimer() {
-    _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) => _updateStats());
-  }
-
-  Future<void> _updateStats() async {
-    if (!mounted || !_isConnected) return;
-    final stats = await widget.signaling.getStats();
-    if (mounted) {
-      setState(() => _stats = stats);
-    }
-  }
-
-  void _toggleStats() {
-    setState(() => _showStats = !_showStats);
   }
 
   @override
@@ -225,12 +215,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Video render
+            // Video display
             Center(
-              child: _isConnected
-                  ? RTCVideoView(
-                      _remoteRenderer,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              child: _currentFrame != null
+                  ? Image.memory(
+                      _currentFrame!,
+                      gaplessPlayback: true,
+                      fit: BoxFit.contain,
                     )
                   : _buildLoadingWidget(),
             ),
@@ -241,14 +232,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 opacity: _showControls ? 1.0 : 0.0,
                 duration: const Duration(milliseconds: 300),
                 child: _buildOverlayControls(),
-              ),
-
-            // Stats overlay
-            if (_showStats && _isConnected)
-              Positioned(
-                top: MediaQuery.of(context).padding.top + 60,
-                right: 16,
-                child: _buildStatsOverlay(),
               ),
 
             // Reconnecting indicator
@@ -340,7 +323,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(
                 children: [
-                  // Back button
                   IconButton(
                     onPressed: _leave,
                     icon: const Icon(
@@ -349,7 +331,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       size: 28,
                     ),
                   ),
-                  // Room code
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
@@ -370,7 +351,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ),
                   const Spacer(),
-                  // Connection status
+                  // FPS indicator
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 10,
@@ -395,7 +376,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          _isConnected ? 'Conectado' : 'Desconectado',
+                          _isConnected ? '${_fps}fps' : '...',
                           style: TextStyle(
                             color: _isConnected ? Colors.green : Colors.red,
                             fontSize: 12,
@@ -417,7 +398,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Fullscreen toggle
                   _buildControlButton(
                     icon: _isFullscreen
                         ? Icons.fullscreen_exit
@@ -426,22 +406,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     onTap: _toggleFullscreen,
                   ),
                   const SizedBox(width: 30),
-                  // Orientation lock
                   _buildControlButton(
                     icon: Icons.screen_lock_rotation,
                     label: 'Rotação',
                     onTap: _toggleOrientation,
                   ),
                   const SizedBox(width: 30),
-                  // Stats toggle
-                  _buildControlButton(
-                    icon: Icons.analytics,
-                    label: 'Stats',
-                    onTap: _toggleStats,
-                    isActive: _showStats,
-                  ),
-                  const SizedBox(width: 30),
-                  // Leave button
                   _buildControlButton(
                     icon: Icons.stop_circle,
                     label: 'Sair',
@@ -462,7 +432,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     required String label,
     required VoidCallback onTap,
     Color color = Colors.white,
-    bool isActive = false,
   }) {
     return GestureDetector(
       onTap: onTap,
@@ -473,13 +442,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
             width: 50,
             height: 50,
             decoration: BoxDecoration(
-              color: isActive
-                  ? const Color(0xFF00D4FF).withOpacity(0.3)
-                  : Colors.white.withOpacity(0.15),
+              color: Colors.white.withOpacity(0.15),
               shape: BoxShape.circle,
-              border: isActive
-                  ? Border.all(color: const Color(0xFF00D4FF), width: 1.5)
-                  : null,
             ),
             child: Icon(icon, color: color, size: 26),
           ),
@@ -489,104 +453,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
             style: TextStyle(
               color: color.withOpacity(0.8),
               fontSize: 11,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatsOverlay() {
-    final qualityColor = Color(_stats.quality.colorValue);
-
-    return Container(
-      width: 220,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.85),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: qualityColor.withOpacity(0.5),
-          width: 1,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Header
-          Row(
-            children: [
-              const Icon(
-                Icons.analytics,
-                color: Color(0xFF00D4FF),
-                size: 16,
-              ),
-              const SizedBox(width: 6),
-              const Text(
-                'STATS',
-                style: TextStyle(
-                  color: Color(0xFF00D4FF),
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1,
-                ),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 2,
-                ),
-                decoration: BoxDecoration(
-                  color: qualityColor.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  _stats.quality.label,
-                  style: TextStyle(
-                    color: qualityColor,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-
-          // Stats rows
-          _buildStatRow('Resolução', _stats.resolutionFormatted),
-          _buildStatRow('FPS', _stats.fpsFormatted),
-          _buildStatRow('Bitrate', _stats.bitrateFormatted),
-          _buildStatRow('RTT', _stats.rttFormatted),
-          _buildStatRow('Jitter', _stats.jitterFormatted),
-          _buildStatRow('Perda', _stats.packetLossFormatted),
-          _buildStatRow('Codec', _stats.codec ?? '--'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.grey[400],
-              fontSize: 11,
-            ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
             ),
           ),
         ],

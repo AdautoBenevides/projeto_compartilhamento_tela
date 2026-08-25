@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'player_screen.dart';
 import 'qr_scanner_screen.dart';
 import '../services/signaling_service.dart';
@@ -14,7 +12,7 @@ class JoinScreen extends StatefulWidget {
 
 class _JoinScreenState extends State<JoinScreen> {
   final TextEditingController _codeController = TextEditingController();
-  final TextEditingController _serverController = TextEditingController(text: 'http://192.168.1.100:3001');
+  final TextEditingController _serverController = TextEditingController(text: 'https://projeto-compartilhamento-tela.onrender.com');
   final SignalingService _signaling = SignalingService();
   bool _isConnecting = false;
   String? _error;
@@ -22,14 +20,6 @@ class _JoinScreenState extends State<JoinScreen> {
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
-  }
-
-  Future<void> _requestPermissions() async {
-    await [
-      Permission.camera,
-      Permission.microphone,
-    ].request();
   }
 
   Future<void> _joinRoom() async {
