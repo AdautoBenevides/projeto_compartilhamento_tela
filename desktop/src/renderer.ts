@@ -2,6 +2,9 @@ import { io, Socket } from 'socket.io-client';
 import { SOCKET_EVENTS, QualityPreset } from './shared/types';
 import { ICE_SERVERS, QUALITY_PRESETS } from './shared/constants';
 
+// Fetched ICE servers from server (includes TURN)
+let fetchedIceServers: RTCIceServer[] | null = null;
+
 // DOM Elements
 const screenSelect = document.getElementById('screen-select') as HTMLSelectElement;
 const qualitySelect = document.getElementById('quality-select') as HTMLSelectElement;
@@ -172,6 +175,18 @@ async function startTransmission(): Promise<void> {
     log('✅ Connected to server', '#2ecc71');
     startBtn.textContent = '⏳ Criando sala...';
 
+    // Fetch ICE servers from server (includes TURN for cross-network)
+    try {
+      const iceRes = await fetch(serverUrl + '/ice-servers');
+      const iceData = await iceRes.json();
+      if (iceData.iceServers && iceData.iceServers.length > 0) {
+        fetchedIceServers = iceData.iceServers.map((s: any) => ({ urls: s.urls, username: s.username, credential: s.credential }));
+        log(`Loaded ${fetchedIceServers!.length} ICE servers from server`, '#2ecc71');
+      }
+    } catch (e) {
+      log('Using default STUN servers', '#f1c40f');
+    }
+
     socket.emit(SOCKET_EVENTS.CREATE_ROOM, {
       quality: currentQuality,
       audioEnabled: audioToggle.checked,
@@ -187,14 +202,14 @@ async function startTransmission(): Promise<void> {
       activeSection.style.display = 'block';
       updateStatus('connected');
 
-      socket!.on(SOCKET_EVENTS.VIEWER_JOINED, (data: any) => {
+      socket!.on(SOCKET_EVENTS.VIEWER_JOINED, async (data: any) => {
         log(`★ Viewer joined: ${data.viewerSocketId}`, '#2ecc71');
-        handleNewViewer(data.viewerSocketId);
+        await handleNewViewer(data.viewerSocketId);
         viewerCountDisplay.textContent = data.viewerCount.toString();
       });
 
       socket!.on(SOCKET_EVENTS.VIEWER_LEFT, (data: any) => {
-        log(`Viewer left: ${data.viewerSocketId}`);
+        log(`Viewer left: ${data.viewerSocketId}`, '#f39c12');
         viewerCountDisplay.textContent = data.viewerCount.toString();
         closePeerConnection(data.viewerSocketId);
       });
@@ -257,7 +272,7 @@ async function startTransmission(): Promise<void> {
 async function handleNewViewer(viewerSocketId: string): Promise<void> {
   if (!localStream) return;
 
-  log(`Peer connection for ${viewerSocketId}`);
+  log(`Creating peer connection for ${viewerSocketId}`);
   const pc = createPeerConnection(viewerSocketId);
   peerConnections.set(viewerSocketId, pc);
 
@@ -283,7 +298,9 @@ async function handleNewViewer(viewerSocketId: string): Promise<void> {
 }
 
 function createPeerConnection(targetSocketId: string): RTCPeerConnection {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const iceServers = fetchedIceServers || ICE_SERVERS;
+  log(`Using ${iceServers.length} ICE servers for peer connection`);
+  const pc = new RTCPeerConnection({ iceServers });
 
   pc.onicecandidate = (event) => {
     if (event.candidate && socket) {

@@ -31,10 +31,12 @@ class SignalingService {
 
   // Buffered offer (received before peer connection is ready)
   dynamic _pendingOffer;
-  // Buffered ICE candidates (received before peer connection is ready)
+  // Buffered ICE candidates (received before remote description is set)
   List<dynamic> _pendingIceCandidates = [];
   // Cached ICE servers (fetched before socket connects)
   List<Map<String, dynamic>>? _cachedIceServers;
+  // Track if remote description has been set (needed to buffer ICE candidates)
+  bool _remoteDescriptionSet = false;
 
   Future<bool> connect(String roomCode, {String serverUrl = 'http://localhost:3001'}) async {
     _roomCode = roomCode;
@@ -112,8 +114,8 @@ class SignalingService {
 
       _socket!.on('ice_candidate', (data) async {
         if (data['candidate'] != null) {
-          if (_peerConnection == null) {
-            debugPrint('[Signaling] Buffering ICE candidate (peer not ready)');
+          if (_peerConnection == null || !_remoteDescriptionSet) {
+            debugPrint('[Signaling] Buffering ICE candidate (not ready: peer=${_peerConnection != null}, remoteDesc=$_remoteDescriptionSet)');
             _pendingIceCandidates.add(data);
             return;
           }
@@ -205,6 +207,7 @@ class SignalingService {
 
   Future<void> _setupPeerConnection() async {
     final iceServers = _cachedIceServers ?? await _fetchIceServers();
+    _remoteDescriptionSet = false;
     _peerConnection = await createPeerConnection({
       'iceServers': iceServers,
       'sdpSemantics': 'unified-plan',
@@ -252,26 +255,6 @@ class SignalingService {
       debugPrint('[WebRTC] Signaling state: $state');
     };
 
-    // Process buffered ICE candidates
-    if (_pendingIceCandidates.isNotEmpty) {
-      debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} buffered ICE candidates');
-      for (final data in _pendingIceCandidates) {
-        if (data['candidate'] != null) {
-          final candidate = RTCIceCandidate(
-            data['candidate']['candidate'],
-            data['candidate']['sdpMid'],
-            data['candidate']['sdpMLineIndex'],
-          );
-          try {
-            await _peerConnection!.addCandidate(candidate);
-          } catch (e) {
-            debugPrint('[WebRTC] Error adding buffered ICE candidate: $e');
-          }
-        }
-      }
-      _pendingIceCandidates.clear();
-    }
-
     // Process buffered offer if one arrived while peer connection was being set up
     if (_pendingOffer != null) {
       debugPrint('[WebRTC] Processing buffered offer');
@@ -306,13 +289,34 @@ class SignalingService {
         RTCSessionDescription(offer['type'], offer['sdp']),
       );
 
+      _remoteDescriptionSet = true;
+      debugPrint('[WebRTC] Remote description set OK, processing ${_pendingIceCandidates.length} buffered ICE candidates');
+
+      // Process any ICE candidates that arrived before the remote description
+      if (_pendingIceCandidates.isNotEmpty) {
+        for (final data in _pendingIceCandidates) {
+          if (data['candidate'] != null) {
+            final candidate = RTCIceCandidate(
+              data['candidate']['candidate'],
+              data['candidate']['sdpMid'],
+              data['candidate']['sdpMLineIndex'],
+            );
+            try {
+              await _peerConnection!.addCandidate(candidate);
+              debugPrint('[WebRTC] Added buffered ICE candidate');
+            } catch (e) {
+              debugPrint('[WebRTC] Error adding buffered ICE candidate: $e');
+            }
+          }
+        }
+        _pendingIceCandidates.clear();
+      }
+
       debugPrint('[WebRTC] Creating answer...');
-      // Create answer
       final answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
 
       debugPrint('[WebRTC] Sending answer to ${data['senderSocketId']}');
-      // Send answer back
       _socket!.emit('webrtc_answer', {
         'targetSocketId': data['senderSocketId'],
         'answer': {
@@ -432,6 +436,7 @@ class SignalingService {
     _peerConnection = null;
     _pendingOffer = null;
     _pendingIceCandidates.clear();
+    _remoteDescriptionSet = false;
 
     _socket?.emit('leave_room');
     _socket?.disconnect();
