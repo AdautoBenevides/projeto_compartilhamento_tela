@@ -300,6 +300,19 @@
         var serverUrl = await window.electronAPI.getServerUrl();
         log('Connecting to ' + serverUrl + '...');
 
+        // Pre-warm: wake up Render free tier before connecting
+        log('Warming up server...');
+        for (var i = 0; i < 3; i++) {
+          try {
+            await fetch(serverUrl.replace(/\/socket\.io.*$/, '') + '/health');
+            log('Server is awake!');
+            break;
+          } catch (e) {
+            log('Waiting for server... (' + (i + 1) + ')');
+            await new Promise(function(r) { setTimeout(r, 3000); });
+          }
+        }
+
         socket = io(serverUrl, {
           transports: ['websocket', 'polling'],
           reconnection: true,
@@ -308,7 +321,7 @@
         });
 
         await new Promise(function(resolve, reject) {
-          var timeout = setTimeout(function() { reject(new Error('Timeout')); }, 15000);
+          var timeout = setTimeout(function() { reject(new Error('Timeout - server may be starting up. Try again in 30 seconds.')); }, 45000);
           socket.on('connect', function() { clearTimeout(timeout); resolve(); });
           socket.on('connect_error', function(err) { clearTimeout(timeout); reject(err); });
         });
