@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: screen-share-signaling
+    runtime: node
+    plan: free
+    buildCommand: cd signaling-server && npm install && npx tsc
+    startCommand: cd signaling-server && node dist/index.js
+    envVars:
+      - key: PORT
+        value: 3001
+      - key: METERED_API_KEY
+        sync: false
+      - key: METERED_APP_NAME
+        value: screenshare-app

@@ -3,17 +3,15 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import { SocketHandler } from './socket/SocketHandler';
-import { spawn } from 'child_process';
-import path from 'path';
 
 const PORT = process.env.PORT || 3001;
 
-// TURN server configuration (coturn runs alongside on TURN_PORT)
-const TURN_PORT = process.env.TURN_PORT || '3478';
-const TURN_SECRET = process.env.TURN_SECRET || 'screen-share-secret';
-const TURN_USERNAME = process.env.TURN_USERNAME || 'screenshare';
-const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL || 'screenshare123';
-const PUBLIC_IP = process.env.PUBLIC_IP || 'localhost';
+// Metered/Open Relay TURN server configuration
+const METERED_API_KEY = process.env.METERED_API_KEY || '';
+const METERED_APP_NAME = process.env.METERED_APP_NAME || '';
+let cachedIceServers: any[] | null = null;
+let lastFetchTime = 0;
+const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 const app = express();
 const httpServer = createServer(app);
@@ -38,67 +36,57 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
 
-// ICE servers endpoint - clients fetch TURN/STUN config from here
-app.get('/ice-servers', (_req, res) => {
-  const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
-    // Google STUN servers
+// Fetch TURN credentials from Metered/Open Relay REST API
+async function fetchTurnCredentials(): Promise<any[]> {
+  if (!METERED_API_KEY) {
+    console.log('[ICE] No METERED_API_KEY set, using STUN only');
+    return getDefaultIceServers();
+  }
+
+  const now = Date.now();
+  if (cachedIceServers && now - lastFetchTime < CACHE_DURATION_MS) {
+    console.log('[ICE] Using cached TURN credentials');
+    return cachedIceServers;
+  }
+
+  try {
+    const url = METERED_APP_NAME
+      ? `https://${METERED_APP_NAME}.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`
+      : `https://global.turn.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`;
+    console.log(`[ICE] Fetching TURN credentials from Metered...`);
+    const response = await fetch(url);
+    if (response.ok) {
+      const data = await response.json();
+      if (Array.isArray(data) && data.length > 0) {
+        cachedIceServers = data;
+        lastFetchTime = now;
+        console.log(`[ICE] Loaded ${data.length} ICE servers (STUN + TURN)`);
+        return data;
+      }
+    }
+    console.log(`[ICE] Metered API returned ${response.status}, using defaults`);
+  } catch (err) {
+    console.error(`[ICE] Failed to fetch TURN credentials:`, err);
+  }
+
+  return getDefaultIceServers();
+}
+
+function getDefaultIceServers() {
+  return [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
   ];
-
-  // Add TURN server if configured (coturn runs on the same host)
-  if (PUBLIC_IP !== 'localhost') {
-    iceServers.push(
-      {
-        urls: `turn:${PUBLIC_IP}:${TURN_PORT}`,
-        username: TURN_USERNAME,
-        credential: TURN_CREDENTIAL,
-      },
-      {
-        urls: `turns:${PUBLIC_IP}:5349?transport=tcp`,
-        username: TURN_USERNAME,
-        credential: TURN_CREDENTIAL,
-      }
-    );
-  }
-
-  res.json({ iceServers });
-});
-
-// Start coturn TURN server if coturn binary exists
-function startCoturn() {
-  const coturnPath = process.env.COTURN_PATH || '/usr/bin/turnserver';
-  const coturnConf = path.join(__dirname, '..', 'coturn.conf');
-
-  try {
-    const coturn = spawn(coturnPath, ['-c', coturnConf], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    coturn.stdout?.on('data', (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (msg) console.log(`[coturn] ${msg}`);
-    });
-    coturn.stderr?.on('data', (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (msg) console.log(`[coturn] ${msg}`);
-    });
-    coturn.on('error', (err) => {
-      console.log(`[coturn] Not found or failed to start: ${err.message}`);
-      console.log('[coturn] TURN relay will not be available. Only STUN will work.');
-    });
-    coturn.on('close', (code) => {
-      console.log(`[coturn] Process exited with code ${code}`);
-    });
-    console.log('[coturn] Starting TURN server...');
-  } catch (e) {
-    console.log('[coturn] Could not start TURN server:', e);
-  }
 }
 
-startCoturn();
+// ICE servers endpoint - clients fetch TURN/STUN config from here
+app.get('/ice-servers', async (_req, res) => {
+  const iceServers = await fetchTurnCredentials();
+  res.json({ iceServers });
+});
 
 // Initialize socket handler
 const socketHandler = new SocketHandler(io);
