@@ -29,6 +29,9 @@ class SignalingService {
   int? _lastBytesReceived;
   int? _lastTimestamp;
 
+  // Buffered offer (received before peer connection is ready)
+  dynamic _pendingOffer;
+
   Future<bool> connect(String roomCode, {String serverUrl = 'http://localhost:3001'}) async {
     _roomCode = roomCode;
     _serverUrl = serverUrl;
@@ -90,6 +93,11 @@ class SignalingService {
       // WebRTC signaling
       _socket!.on('webrtc_offer', (data) async {
         debugPrint('[Signaling] Received offer from ${data['senderSocketId']}');
+        if (_peerConnection == null) {
+          debugPrint('[WebRTC] Peer connection not ready yet, buffering offer');
+          _pendingOffer = data;
+          return;
+        }
         await _handleOffer(data);
       });
 
@@ -229,6 +237,14 @@ class SignalingService {
     _peerConnection!.onSignalingState = (state) {
       debugPrint('[WebRTC] Signaling state: $state');
     };
+
+    // Process buffered offer if one arrived while peer connection was being set up
+    if (_pendingOffer != null) {
+      debugPrint('[WebRTC] Processing buffered offer');
+      final offer = _pendingOffer;
+      _pendingOffer = null;
+      await _handleOffer(offer);
+    }
   }
 
   Future<void> _restartIce() async {
